@@ -16,6 +16,7 @@ class UnknownError(Exception): pass
 class CantPrepare(Exception): pass
 class Stuck(Exception): pass
 
+
 class Instance(object):
 
     class State(object):
@@ -314,7 +315,8 @@ class Replica(object):
     @send
     def send_preaccept(self, instance):
         instance.incr_ballot()
-        responses = [PackedResponse(self.peers[r].handle_preaccept(PreacceptRequest(deepcopy(instance))), r) for r in instance.replicas if r != self.name]
+        responses = [PackedResponse(self.peers[r].handle_preaccept(PreacceptRequest(deepcopy(instance))), r)
+                     for r in instance.replicas if r != self.name]
 
         # filter out timeout responses
         responses = filter(lambda m: m.response != TimeoutResponse, responses)
@@ -445,7 +447,7 @@ class Replica(object):
         if instance is not None and self.check_remote_ballot(msg_instance):
             return AcceptResponse(self.check_remote_ballot(msg_instance))
 
-        instance = deepcopy(msg_instance).reset_for_local()
+        instance = instance or deepcopy(msg_instance).reset_for_local()
 
         if instance.state < Instance.State.ACCEPTED:
             instance.accept(msg_instance.dependencies, msg_instance.ballot)
@@ -535,6 +537,8 @@ class Replica(object):
 
             return cant_execute
 
+        # strongly connected components are arbitrarily ordered
+        # by their uuid1 ids
         def scc_comparator(x, y):
             x = self.instances[x]
             y = self.instances[y]
@@ -580,27 +584,6 @@ class Replica(object):
                     if to_execute.iid == instance.iid:
                         return Executed
                     continue
-
-                seen = set()
-                def deps_are_committed(inst):
-                    rval = True
-
-                    if inst.iid in seen:
-                        return True
-                    seen.add(inst.iid)
-
-                    for dep in inst.dependencies:
-                        dep_inst = self.instances[dep]
-                        if dep_inst.state < Instance.State.COMMITTED:
-                            rval = False
-                            self.prepare(dep_inst)
-
-                        rval = deps_are_committed(dep_inst) and rval
-
-                    return rval
-
-                if not deps_are_committed(to_execute):
-                    break
 
                 to_execute.mark_executed()
                 if not to_execute.noop:
@@ -697,12 +680,18 @@ class Replica(object):
         mnip = int((instance.F + 1) / 2)
 
         dep_groups = defaultdict(set)
+        dep_scores = defaultdict(lambda: 0)
         relevant_replicas = set()
         for response in responses:
             inst = response.response.instance
             deps = frozenset(inst.dependencies) if inst is not None and inst.dependencies is not None else None
             dep_groups[deps].add(response.replica)
             relevant_replicas.add(response.replica)
+
+            # the deps that agreed with the leader should always be tried first
+            score = 1 + (int(inst.leader_deps_match) * len(instance.replicas)) - int(inst.fast_path_impossible)
+            dep_scores[deps] = score
+
 
         attempts = []
         for deps, replicas in dep_groups.items():
@@ -715,13 +704,20 @@ class Replica(object):
 
         # make sure the ordering of the attempts doesn't obscure any problems
         random.shuffle(attempts)
+
+        # order the attempts so that deps that matched the command leader's deps are
+        # attempted first, and the failed command leader's deps are tried last
+        attempts.sort(key=lambda a: -dep_scores[a.deps])
+
         return attempts
 
     def trypreaccept_phase(self, instance, responses):
         assert isinstance(instance, Instance)
         assert all([r.response.instance is None or r.response.instance.state == Instance.State.PREACCEPTED for r in responses])
 
-        if self.name in instance.replicas and instance.fast_path_impossible:
+        instances = filter(None, [r.response.instance for r in responses])
+        fast_path_impossible = any([i.fast_path_impossible for i in instances])
+        if fast_path_impossible:
             return False
 
         for deps, replicas, agreeing_replicas in self._get_trypreaccept_deps_and_replicas(instance, responses):
@@ -758,7 +754,12 @@ class Replica(object):
         assert isinstance(msg_instance, Instance)
 
         # get instances that the message instance doesn't have in it's dependencies
-        possible_conflicts = set(self.instances.keys()) - set(message.dependencies)
+        possible_conflicts = set(self.instances.keys()) - set(message.dependencies) - {msg_instance.iid}
+
+        # if this replica hasn't seen the some of the proposed dependencies, don't preaccept it
+        valid_instance = lambda i: i.state > Instance.State.PREACCEPTED or i.dependencies is not None
+        if not all([iid in self.instances and valid_instance(self.instances[iid]) for iid in msg_instance.dependencies]):
+            return TryPreacceptResponse(False)
 
         for conflict in [self.instances[iid] for iid in possible_conflicts]:
             assert isinstance(conflict, Instance)

@@ -287,7 +287,7 @@ class EpaxosIntegrationTest(EpaxosTestCase):
 
         expected_order.append(successful_instance)
         self.check_execution_order(self.replicas[-self.fast_path_quorum_size:], expected_order)
-        # self.check_execution_order(self.replicas, expected_order, allow_unexecuted=True)
+        self.check_execution_order(self.replicas, expected_order, allow_unexecuted=True)
 
 
 class EpaxosIntegrationTestReplicaLeaderRF3(EpaxosIntegrationTest):
