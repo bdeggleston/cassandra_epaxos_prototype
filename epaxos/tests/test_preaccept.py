@@ -73,5 +73,14 @@ class PreacceptTest(EpaxosTestCase):
         self.assertIsNot(remote_instance, instance)
         self.assertEqual(remote_instance.dependencies, expected_deps)
 
+    def test_quorum_failure_marks_instance_as_fast_path_impossible(self):
+        pass
+
+    def test_disagreeing_responses_marks_fast_path_impossible(self):
+        pass
+
+    def test_less_than_fast_path_quorum_responses_marks_fast_path_impossible(self):
+        pass
+
 class PreacceptIntegrationTest(EpaxosTestCase):
     pass

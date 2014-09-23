@@ -225,6 +225,7 @@ class EpaxosIntegrationTest(EpaxosTestCase):
         with self.assertRaises(QuorumFailure):
             leader1.coordinate_request(self.replicas, nickname="failed_instance")
         failed_instance = leader1.last_created_instance
+        self.assertTrue(failed_instance.fast_path_impossible)
         self.check_replicas_instance(failed_instance, set(), self.replicas[self.fast_path_quorum_size:], IS.PREACCEPTED)
         self.check_replicas_instance_unseen(failed_instance, self.replicas[:self.fast_path_quorum_size])
 

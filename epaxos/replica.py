@@ -48,7 +48,17 @@ class Instance(object):
         self.noop = False
 
         self.dependencies = None
+
+        # indicates that, on preaccept, a
+        # non-command leader agreed with
+        # the dependencies attached to the
+        # preaccept request form the command leader
         self.leader_deps_match = False
+
+        # set by a replica command leader if
+        # a command could not be committed on
+        # the fast path for any reasonse
+        self.fast_path_impossible = False
 
         self.preaccept_deps = None
         self.accept_deps = None
@@ -332,7 +342,11 @@ class Replica(object):
         if len(errors) != 0:
             raise UnknownError("Unhandled errors returned: {}".format(errors))
 
-        self.check_quorum_response(instance, responses)
+        try:
+            self.check_quorum_response(instance, responses)
+        except QuorumFailure:
+            instance.fast_path_impossible = True
+            raise
 
         return responses
 
@@ -372,6 +386,8 @@ class Replica(object):
         # received enough responses to satisfy a fast-path quorum, we can skip the accept phase
         if len(dep_groups) == 1 and len(response_instances) >= instance.fast_path_quorum_size:
             return
+
+        instance.fast_path_impossible = True
 
         missing_instances = {}
         if self.name in inst.dependencies:
@@ -704,6 +720,9 @@ class Replica(object):
     def trypreaccept_phase(self, instance, responses):
         assert isinstance(instance, Instance)
         assert all([r.response.instance is None or r.response.instance.state == Instance.State.PREACCEPTED for r in responses])
+
+        if self.name in instance.replicas and instance.fast_path_impossible:
+            return False
 
         for deps, replicas, agreeing_replicas in self._get_trypreaccept_deps_and_replicas(instance, responses):
             assert deps is not None
