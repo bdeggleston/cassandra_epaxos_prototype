@@ -231,6 +231,10 @@ class Replica(object):
         instance = deepcopy(instance).reset_for_local()
         if instance.state > Instance.State.COMMITTED:
             instance.state = Instance.State.COMMITTED
+        elif instance.state < Instance.State.ACCEPTED:
+            # if the instance is preaccepted, we can't trust it's dependencies
+            # without affecting the outcome of prepare
+            instance.dependencies = None
 
         self.instances.setdefault(instance.iid, instance)
         return instance
@@ -271,8 +275,9 @@ class Replica(object):
             self.send_commit(instance)
             result = self.execute(instance)
             # clean up the other replicas
-            for peer in [self.peers[r] for r in instance.replicas if self.peers[r].state == Replica.State.UP]:
-                peer.execute(peer.instances.get(instance.iid))
+            for peer in [self.peers[r] for r in instance.replicas if r != self.name]:
+                if peer.state == Replica.State.UP:
+                    peer.execute(peer.instances.get(instance.iid))
             return result
         else:
             result = None
@@ -307,7 +312,10 @@ class Replica(object):
         if self.name in instance.replicas:
             for response in responses:
                 for missing in response.response.missing_instances:
-                    self.instances.setdefault(missing.iid, deepcopy(missing).reset_for_local())
+                    missing = deepcopy(missing).reset_for_local()
+                    if missing.state < Instance.State.ACCEPTED:
+                        missing.dependencies = None
+                    self.instances.setdefault(missing.iid, missing)
 
         # check we didn't get anything weird back
         assert all([isinstance(r.response, PreacceptResponse) for r in responses])
@@ -411,7 +419,10 @@ class Replica(object):
         assert isinstance(msg_instance, Instance)
 
         for missing in message.missing_instances:
-            self.instances.setdefault(missing.iid, deepcopy(missing).reset_for_local())
+            missing = deepcopy(missing).reset_for_local()
+            if missing.state < Instance.State.ACCEPTED:
+                missing.dependencies = None
+            self.instances.setdefault(missing.iid, missing)
 
         instance = self.instances.get(msg_instance.iid)
 
@@ -483,23 +494,20 @@ class Replica(object):
             assert isinstance(inst, Instance)
             if inst.iid in dep_graph:
                 return
-            dep_graph[inst.iid] = inst.dependencies.copy()
             if inst.state < Instance.State.COMMITTED:
                 uncommitted.add(inst.iid)
+
+            if inst.dependencies is None:
+                assert inst.state < Instance.State.ACCEPTED
+                uncommitted.add(inst.iid)
+                return True
+            dep_graph[inst.iid] = inst.dependencies.copy()
             for iid in inst.dependencies:
                 if iid not in self.instances:
-                    # this is cheating
-                    for peer in self.peers.values():
-                        if peer.state != Replica.State.UP:
-                            continue
-                        if iid in peer.instances and peer.name in peer.instances[iid].replicas:
-                            peer_instance = peer.instances[iid]
-                            if peer_instance.state > Instance.State.PREACCEPTED:
-                                self.instances.setdefault(peer_instance.iid, deepcopy(peer_instance).reset_for_local())
-                                break
-                            peer.prepare(peer_instance)
-                            if iid in uncommitted: uncommitted.remove(iid)
-                            break
+                    dep_inst = deepcopy(self.request_instance(iid)).reset_for_local()
+                    if dep_inst.state < Instance.State.ACCEPTED:
+                        uncommitted.add(iid)
+                        continue
 
                 assert iid in self.instances, self
 
@@ -606,7 +614,8 @@ class Replica(object):
         # include the local instance in the responses to inspect.
         # since prepare is only attempted at execution time, and execution is only performed
         # by replicas, we don't need to check if we're a replica
-        augmented_responses = responses + [PackedResponse(PrepareResponse(instance, None), self.name)]
+        this_response = [PackedResponse(PrepareResponse(instance, None), self.name)] if instance.dependencies is not None else []
+        augmented_responses = responses + this_response
 
         # check for accepted responses, including ourself
         # if any replicas accepted this instance, it means that it's been recorded by them, and will
@@ -675,7 +684,7 @@ class Replica(object):
         relevant_replicas = set()
         for response in responses:
             inst = response.response.instance
-            deps = frozenset(inst.dependencies) if inst is not None else None
+            deps = frozenset(inst.dependencies) if inst is not None and inst.dependencies is not None else None
             dep_groups[deps].add(response.replica)
             relevant_replicas.add(response.replica)
 
@@ -697,6 +706,7 @@ class Replica(object):
         assert all([r.response.instance is None or r.response.instance.state == Instance.State.PREACCEPTED for r in responses])
 
         for deps, replicas, agreeing_replicas in self._get_trypreaccept_deps_and_replicas(instance, responses):
+            assert deps is not None
             responses = self.send_trypreaccept(instance, deps, replicas)
             required_successes = (instance.F + 1) - agreeing_replicas
             if len([r for r in responses if r.response.success]) >= required_successes:
@@ -724,11 +734,12 @@ class Replica(object):
     @receive
     def handle_trypreaccept(self, message):
         assert isinstance(message, TryPreacceptRequest)
-        msg_instance = message.instance
+        msg_instance = deepcopy(message.instance).reset_for_local()
+        msg_instance.dependencies = message.dependencies
         assert isinstance(msg_instance, Instance)
 
         # get instances that the message instance doesn't have in it's dependencies
-        possible_conflicts = set(self.instances.keys()) - set(msg_instance.dependencies)
+        possible_conflicts = set(self.instances.keys()) - set(message.dependencies)
 
         for conflict in [self.instances[iid] for iid in possible_conflicts]:
             assert isinstance(conflict, Instance)

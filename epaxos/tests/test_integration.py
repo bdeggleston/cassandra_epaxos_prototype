@@ -293,6 +293,7 @@ class EpaxosIntegrationTestReplicaLeaderRF3(EpaxosIntegrationTest):
     replication_factor = 3
     leader_is_replica = True
 
+@skip
 class EpaxosIntegrationTestNonReplicaLeaderRF3(EpaxosIntegrationTest):
     replication_factor = 3
     leader_is_replica = False
@@ -301,6 +302,7 @@ class EpaxosIntegrationTestReplicaLeaderRF5(EpaxosIntegrationTest):
     replication_factor = 5
     leader_is_replica = True
 
+@skip
 class EpaxosIntegrationTestNonReplicaLeaderRF5(EpaxosIntegrationTest):
     replication_factor = 5
     leader_is_replica = False
@@ -309,6 +311,7 @@ class EpaxosIntegrationTestReplicaLeaderRF7(EpaxosIntegrationTest):
     replication_factor = 7
     leader_is_replica = True
 
+@skip
 class EpaxosIntegrationTestNonReplicaLeaderRF7(EpaxosIntegrationTest):
     replication_factor = 7
     leader_is_replica = False
